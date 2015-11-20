@@ -1,0 +1,209 @@
+#include<linux/module.h>
+#include<linux/init.h>
+#include <linux/moduleparam.h>
+#include<linux/kernel.h>
+#include <linux/slab.h>
+#include<linux/types.h>
+#include<linux/fs.h>
+#include<linux/errno.h>
+#include<linux/mm.h>
+#include<linux/sched.h>
+#include<linux/cdev.h>
+#include<asm/io.h>
+#include<asm/system.h>
+#include<asm/uaccess.h>
+
+#define MEMDEV_SIZE  0x1000
+#define MEM_CLEAR  0x1
+#define MEMDEV_MAJOR 0
+
+int memdev_major = MEMDEV_MAJOR;
+module_param(memdev_major, int, S_IRUGO);
+struct memdev_dev{
+    struct cdev cdev;
+    unsigned char mem[MEMDEV_SIZE];
+};
+
+struct memdev_dev  *memdev_devp;
+
+static int memdev_open(struct inode *inodep,struct file *filp)
+{
+    filp->private_data = memdev_devp;
+    return 0;
+}
+
+static int memdev_release(struct inode *inodep,struct file *filp)
+{
+    return 0;
+}
+
+static ssize_t memdev_read(struct file *filp,char __user *buf,size_t size,loff_t *ppos)
+{
+    unsigned long p = *ppos;
+    unsigned int count = size;
+    int ret = 0;
+
+    struct memdev_dev *dev = filp->private_data;
+
+    if(p >= MEMDEV_SIZE)
+        return 0;
+    if(count > MEMDEV_SIZE - p)
+        count = MEMDEV_SIZE - p;
+
+    if(copy_to_user(buf,(void *)dev->mem+p,count)){
+        ret = -EFAULT;
+    }
+    else{
+        *ppos += count;
+        ret = count;
+
+        printk(KERN_WARNING "Read %u byte(s) from %lu \n",count,p);
+    }
+    return ret;
+}
+
+static ssize_t memdev_write(struct file *filp,const char __user *buf,size_t size,loff_t *ppos)
+{
+    unsigned long p = *ppos;
+    unsigned int count = size;
+    int ret = 0;
+
+    struct memdev_dev *dev = filp->private_data;
+
+    if(p >= MEMDEV_SIZE)
+        return 0;
+    if(count > MEMDEV_SIZE - p)
+        count = MEMDEV_SIZE - p;
+
+    if(copy_from_user(dev->mem + p,buf,count))
+        ret = -EFAULT;
+    else{
+        *ppos += count;
+        ret = count;
+
+        printk(KERN_WARNING "Written %u byte(s) from %lu \n",count,p);
+    }
+    return ret;
+}
+
+static int memdev_ioctl(struct inode *inodep,struct file *filp,unsigned int cmd,unsigned long arg)
+{
+    struct memdev_dev *dev = filp->private_data;
+
+    switch(cmd){
+        case MEM_CLEAR:
+            memset(dev->mem,0,MEMDEV_SIZE);
+            printk(KERN_WARNING "memdev has set to zero.\n");
+            break;
+
+        default:
+            return -EINVAL;
+    }
+    return 0;
+}
+
+static loff_t memdev_llseek(struct file *filp,loff_t offset,int whence)
+{
+    loff_t ret = 0;
+    switch(whence){
+        case 0:
+            if(offset < 0){
+                ret = -EINVAL;
+                break;
+            }
+            if((unsigned int )offset > MEMDEV_SIZE){
+                ret = -EINVAL;
+                break;
+            }
+
+            filp->f_pos = (unsigned int)offset;
+            ret = filp->f_pos;
+            break;
+
+        case 1:
+            if((filp->f_pos + offset) < 0){
+                ret = -EINVAL;
+                break;
+            }
+            if((filp->f_pos + offset) > MEMDEV_SIZE){
+                ret = -EINVAL;
+                break;
+            }
+
+            filp->f_pos += (unsigned int)offset;
+            ret = filp->f_pos;
+          break;
+        default:
+            ret = -EINVAL;
+            break;
+    }
+    return ret;
+}
+
+static const struct file_operations memdev_fops = {
+    .owner = THIS_MODULE,
+    .open = memdev_open,
+    .release = memdev_release,
+    .read = memdev_read,
+    .write = memdev_write,
+    .ioctl = memdev_ioctl,
+    .llseek = memdev_llseek,
+};
+
+static void memdev_setup_cdev(struct memdev_dev *dev,int index)
+{
+    int err,devno = MKDEV(memdev_major,index);
+
+    cdev_init(&dev->cdev,&memdev_fops);
+    dev->cdev.owner = THIS_MODULE;
+    dev->cdev.ops = &memdev_fops;
+    err = cdev_add(&dev->cdev,devno,1);
+
+    if(err)
+        printk(KERN_WARNING "Error %d adding memdev %d",err,index);
+}
+
+static int __init memdev_init(void)
+{
+    int result;
+    dev_t devno = MKDEV(memdev_major,0);
+
+    if(memdev_major)
+        result = register_chrdev_region(devno,1,"memdev");
+    else{
+            result = alloc_chrdev_region(&devno, 0, 1, "memdev");
+            memdev_major = MAJOR(devno);
+    }
+    if(result<0)
+        return result;
+
+    memdev_devp = kmalloc(sizeof(struct memdev_dev),GFP_KERNEL);  
+    if(!memdev_devp){
+        result = -ENOMEM;
+        goto fail_malloc;
+    }
+
+    memset(memdev_devp,0,sizeof(struct memdev_dev));
+
+    memdev_setup_cdev(memdev_devp,0);
+    return 0;
+fail_malloc:
+                unregister_chrdev_region(devno, 1);
+                return result;
+}
+
+static void __exit memdev_exit(void)
+{
+    cdev_del(&memdev_devp->cdev);
+    kfree(memdev_devp);
+    unregister_chrdev_region(MKDEV(memdev_major,0), 1);
+}
+
+module_init(memdev_init);
+module_exit(memdev_exit);
+  
+  
+  
+MODULE_AUTHOR("lwj<http://blog.csdn.net/lwj103862095>");  
+MODULE_LICENSE("Dual BSD/GPL");  
+MODULE_DESCRIPTION("a simple char driver in memory");
